@@ -1,4 +1,4 @@
-# ExalusIntegrationForHomeAssistant
+# Exalus integration for HomeAssistant
 
 To connect to controller you have to use Controller API.workbook and download Xamarin Workbooks on your computer install it and run.
 Then you have to open this file from Xamarin Workbooks and you will see the C# code that allows you to negotiate the server address to which the given controller is connected 
