@@ -1,0 +1,663 @@
+---
+uti: com.xamarin.workbook
+id: ebc9139f-9d3f-41cf-befe-3839754c0ec0
+title: Controller API
+platforms:
+- DotNetCore
+packages:
+- id: Microsoft.AspNetCore.SignalR.Client
+  version: 6.0.8
+- id: Newtonsoft.Json
+  version: 13.0.1
+---
+
+Logging helper methods
+
+```csharp
+private void Log(Exception ex)
+    => Log(ex.ToString());
+
+private void Log(string text)
+    => Console.WriteLine($"{DateTime.Now} | {text}");
+```
+
+DataFrame used for communication
+
+```csharp
+public enum Status
+    {
+        /// <summary>
+        /// Gdy zapytanie się powiodło i nie wystąpiły błędy
+        /// </summary>
+        OK = 0,
+
+        /// <summary>
+        /// Gdy wystąpił nieznany błąd podczas wykonywania zapytania
+        /// </summary>
+        UnknownError = 1,
+
+        /// <summary>
+        /// Gdy wystąpił błąd którego oprogramowanie kontrolera nie mogło rozwiązać
+        /// </summary>
+        FatalError = 2,
+
+        /// <summary>
+        /// Gdy zapytanie zostało wykonane z niepoprawnymi danymi
+        /// </summary>
+        WrongData = 3,
+
+        /// <summary>
+        /// Gdy zostało wykonane zapytanie do zasobu który nie istnieje
+        /// </summary>
+        ResourceDoesNotExists = 4,
+
+        /// <summary>
+        /// Gdy zostało wykonane zapytanie o wykonanie operacji do której zalogowany użytkownik nie ma uprawnień (np. gdy próbuje zmienić dane użytkownika o uprawnieniach wyższych od siebie)
+        /// </summary>
+        NoPermissionToPerformThisOperation = 5,
+
+        /// <summary>
+        /// Gdy zostanie dokonana próba ponownego logowania dla już zalogowanej sesji
+        /// </summary>
+        SessionHasAlreadyLoggedOnUser = 6,
+
+        /// <summary>
+        /// Gdy żądana operacja jest niedozwolona
+        /// </summary>
+        OperationNotPermitted = 7,
+
+        /// <summary>
+        /// Gdy zostanie wykonane zapytanie do zasobu do którego użytkownik nie ma uprawnień
+        /// </summary>
+        NoPermissionsToCallGivenResource = 8,
+
+        /// <summary>
+        /// Gdy zostanie wykonane zapytanie do zasobu aktualnie nie dostępnego (gdy np. zasób został wyłączony)
+        /// </summary>
+        ResourceIsNotAvailable = 9,
+
+        /// <summary>
+        /// Gdy zapytanie do zasobu zakończyło się okreslonym błędem
+        /// </summary>
+        Error = 10,
+
+        /// <summary>
+        /// Gdy w ramach odpowiedzi na zapytanie nie są zwracane dane
+        /// </summary>
+        NoData = 11,
+
+        /// <summary>
+        /// Gdy zostanie wykonane zapytanie do nie wspieranego zasobu (np. dotyczącego okreslonego systemu operacyjnego)
+        /// </summary>
+        NotSupportedMethod = 12,
+
+        /// <summary>
+        /// Gdy zostanie wykonane zapytanie do dowolnego zasobu a żaden użytkownik nie jest zalogowany w ramach sesji
+        /// </summary>
+        UserIsNotLoggedIn = 13,
+        /// <summary>
+        /// Przewidziane dla zapytań które zwracają wiele odpowiedzi, np. postęp w realizacji jakiegoś procesu
+        /// </summary>
+        MultiDataResponseStart = 14,
+        /// <summary>
+        /// Przewidziane dla zapytań które zwracają wiele odpowiedzi, np. postęp w realizacji jakiegoś procesu. Informuje, że dana odpowiedź jest jedną z odpowiedzi
+        /// </summary>
+        MultiDataResponse = 15,
+        /// <summary>
+        /// Przewidziane dla zapytań które zwracają wiele odpowiedzi, np. postęp w realizacji jakiegoś procesu. Informuje, że dana odpowiedź jest ostatnią odpowiedzią danego zasobu
+        /// </summary>
+        MultiDataResponseStop = 16
+    }
+
+    public enum Method
+    {
+        Get = 0,
+        Post = 1,
+        Delete = 2,
+        Put = 3,
+        Options = 4,
+        Head = 5
+    }
+    
+public class DataFrame<T> : DataFrame
+{
+        public new T Data { get; set; }
+}
+
+public class DataFrame
+{
+        public DataFrame()
+        {
+            Status = Status.OK;
+            TransactionId = Guid.NewGuid().ToString();
+        }
+        public string Resource { get; set; }
+        public Status Status { get; set; }
+        public Method Method { get; set; }
+        public string TransactionId { get; set; }
+        public object Data { get; set; }
+}
+```
+
+Cloud client
+
+```csharp
+#r "Microsoft.AspNetCore.SignalR.Client"
+#r "Newtonsoft.Json"
+
+using System;
+using System.Net.Http;
+using Microsoft.Extensions.Logging;
+using Microsoft.AspNetCore.SignalR.Client;
+/// for python see: https://github.com/mandrewcito/signalrcore
+
+public class BrokerClient
+{
+        private HubConnection connection;
+        private HubConnectionBuilder hubConnectionBuilder;
+        public static readonly int Timeout = 15_000; //15s
+        public static string ServerUri = "http://br1.tr7.pl/broker";
+        public static string ServersBrokerUrl = "http://broker.tr7.pl";
+        private static List<string> KnownPacketsBrokers =  new List<string> { "br1.tr7.pl" ,"br1.exala.pl" };
+        public static string ControllerSerial = string.Empty;
+        private static string ControllerSessionId = string.Empty;
+        public static int ControllerPin = 0;
+
+        public delegate void PingReceived();
+        public event PingReceived OnPingReceived;
+
+        public delegate void AuthorizationReceived(bool data);
+        public event AuthorizationReceived OnAuthorizationReceived;
+        
+        public delegate void RegistrationReceived(string data);
+        public event RegistrationReceived OnRegistrationReceived;
+
+        public delegate void SessionRemoved(string sessionId);
+        public event SessionRemoved OnSessionRemoved;
+
+        public delegate void DataReceived(string sender, string data);
+        public event DataReceived OnDataReceived;
+
+        public delegate void Disconnected();
+        public event Disconnected OnDisconnected;
+
+        private void Log(Exception ex)
+            => Log(ex.ToString());
+
+        private void Log(string text)
+            => Console.WriteLine($"{DateTime.Now} | {text}");
+
+        public HubConnectionState GetConnectionStatus()
+            => connection != null ? connection.State : HubConnectionState.Disconnected;
+
+        private Task Connection_Closed(Exception arg)
+        {
+            Log("Disconnected from cloud!");
+            Log(arg);
+            OnDisconnected?.Invoke();
+            return Task.CompletedTask;
+        }
+
+        private void AttachEvents()
+        {
+            /// ping response handling
+            connection.On("Pong", () => {
+                Log("Received ping-pong from server");
+                OnPingReceived?.Invoke();
+            });
+
+            /// registration
+            connection.On<string>("Registration", (resp) => { 
+                Log($"Registration: {resp}");
+                OnRegistrationReceived?.Invoke(resp);
+            });
+
+            /// authorization
+            connection.On<bool>("Authorization", (resp) => { 
+                Log($"Authorization {resp}");
+                OnAuthorizationReceived?.Invoke(resp);
+            });
+
+            /// catch errors
+            connection.On<string>("SendError", (info) =>
+            {
+                try
+                {
+                    if (info.StartsWith("NotAuthorized:"))
+                    {
+                        var z = info.Replace("NotAuthorized:", "");
+                        OnSessionRemoved?.Invoke(z);
+                        Log($"Session has been removed, session id: {z}");
+                    }
+                    else
+                        Log(new InvalidOperationException($"Cloud reported unhandled error: {info}"));
+                }
+                catch (Exception e)
+                {
+                    Log($"SendError<string>: {e} {info}");
+                }
+            });
+
+            /// receive data
+            connection.On<string, object>("Data", (sender, data) =>{ 
+                OnDataReceived?.Invoke(sender, data.ToString());
+                //Log($"Received data from [{sender}] {data}");
+            });
+        }
+
+        public async Task<string> GetBrokerUrlAsync(string controllerId)
+        {
+            var client = new HttpClient();
+            var result = await client.GetAsync($"{ServersBrokerUrl}/api/connections/broker/whichserver/{controllerId}");
+
+            if (!result.IsSuccessStatusCode || result.StatusCode != System.Net.HttpStatusCode.OK)
+                throw new HttpRequestException($"Received wrong response from servers broker! Status code code: {result.StatusCode}");
+
+            var content = await result.Content.ReadAsStringAsync();
+            client.Dispose();
+            result.Dispose();            
+            return content;
+        }
+
+        private List<string> TriedServers = new List<string>();
+
+        public async Task<bool> ConnectAsync(string serialId, int pin, string serverAddress = null)
+        {
+            try 
+            {
+                ControllerSerial = serialId;
+                ControllerPin = pin;
+                var brokerUrl = serverAddress != null ? serverAddress : await GetBrokerUrlAsync(serialId);
+                ServerUri = $"http://{brokerUrl}/broker";
+                Log($"Got broker URL: {ServerUri}");
+
+                hubConnectionBuilder = new HubConnectionBuilder();
+                connection = hubConnectionBuilder.WithUrl(ServerUri, (conf) =>
+                {
+                    conf.CloseTimeout = TimeSpan.FromSeconds(Timeout);
+                    conf.WebSocketConfiguration = (con) => con.KeepAliveInterval = TimeSpan.FromSeconds(Timeout);
+                })
+                .ConfigureLogging(logging =>
+                {
+                    logging.SetMinimumLevel(LogLevel.Information);
+                    logging.AddProvider(new LoggerProvider());
+                })
+                .Build();
+
+                connection.ServerTimeout = TimeSpan.FromSeconds(Timeout);
+                connection.Closed += Connection_Closed;
+
+                AttachEvents();
+
+                Log("Connecting to broker...");
+                TriedServers.Add(brokerUrl);
+                await connection.StartAsync(new System.Threading.CancellationTokenSource(5000).Token);
+
+                if(await AuthorizeAsync(serialId, pin))
+                {
+                    Log($"Succesfully authorized to controller serial: {serialId} pin:{pin}.");
+                    TriedServers.Clear();
+                    return true;
+                }
+                else
+                {
+                    foreach(var s in KnownPacketsBrokers.Where(a => TriedServers.All(b => a != b)))
+                    {
+                        Log($"Failed to authorize to {brokerUrl}, trying to connect using: {s}");
+                        //await connection.StopAsync();
+                        return await ConnectAsync(serialId, pin, s);
+                    }
+                    Log(new OperationCanceledException($"Failed to authorize to controller."));
+                    return false;
+                }
+            }
+            catch (Exception e)
+            {
+                Log(e);
+                return false;
+            }
+        }
+
+        private async Task<bool> AuthorizeAsync(string controllerSerial, int pin)
+        {
+            var tcs = new TaskCompletionSource<bool>();
+            var timer = new System.Timers.Timer
+            {
+                AutoReset = false,
+                Interval = Timeout
+            };
+
+            AuthorizationReceived onAuth = null;
+            onAuth = (result) =>
+            {
+                if (!result)
+                    Log($"Authorization failed!");
+
+                Log($"Authorization result: {result}");
+                OnAuthorizationReceived -= onAuth;
+                tcs.TrySetResult(result);
+                timer.Stop();
+                timer.Dispose();
+            };
+            OnAuthorizationReceived += onAuth;
+
+            try
+            {
+                timer.Elapsed += (s, e) =>
+                {
+                    OnAuthorizationReceived -= onAuth;
+                    timer.Stop();
+                    tcs.TrySetResult(false);
+                    timer.Dispose();
+                };
+                timer.Start();
+                await connection.SendAsync("AuthorizeTo", controllerSerial, pin.ToString());
+            }
+            catch (Exception e)
+            {
+                tcs.TrySetException(e);
+            }
+
+            return await tcs.Task;
+        }
+        
+        public async Task StopAsync()
+        {
+            try
+            {
+                await connection?.StopAsync(new System.Threading.CancellationTokenSource(2000).Token);
+            }
+            catch (Exception e)
+            {
+                Log($"BrokerClient.StopAsync exception: {e}");
+            }
+        }
+
+        public async void Dispose()
+        {
+            try
+            {
+                if (connection.State != HubConnectionState.Disconnected)
+                    await StopAsync();
+
+                connection?.DisposeAsync();
+            }
+            catch (Exception e)
+            {
+                Log(e);
+            }
+        }
+
+        public async Task<bool> SendToControllerAsync(object data)
+        {
+            try
+            {
+                await connection.SendAsync("SendTo", ControllerSerial, Newtonsoft.Json.JsonConvert.SerializeObject(data));
+            }
+            catch (Exception e)
+            {
+                Log(e);
+                return false;
+            }
+
+            return true;
+        }
+
+        public async Task<DataFrame<TResult>> SendAndWaitForResponseAsync<TData, TResult>(DataFrame<TData> frame, int timeout = 8000)
+        {
+            DataReceived onReceive = null;
+            var timer = new  System.Timers.Timer(timeout);
+            var tcs = new TaskCompletionSource<DataFrame<TResult>>();
+            timer.Elapsed += (s, o) => {
+                OnDataReceived -= onReceive;
+                tcs.TrySetException(new TimeoutException($"Timeout occured when waiting for response from controller for request: {frame.Resource} {frame.Method} id: {frame.TransactionId}"));
+                timer.Stop();
+                timer.Dispose();
+            };
+
+            try 
+            {
+                onReceive = (source, data) => 
+                {
+                    var received = Newtonsoft.Json.JsonConvert.DeserializeObject<DataFrame>(data);
+
+                    if(received.TransactionId == frame.TransactionId)
+                    {                    
+                        OnDataReceived -= onReceive;
+                        Log($"Received response for request {received.Resource} {received.Method} id: {received.TransactionId}");
+                        tcs.TrySetResult(Newtonsoft.Json.JsonConvert.DeserializeObject<DataFrame<TResult>>(data));
+                        timer.Stop();
+                        timer.Dispose();
+                    }
+                };
+
+                OnDataReceived += onReceive;
+                timer.Start();
+                Log($"Sending request: {frame.Resource} {frame.Method} id: {frame.TransactionId}");
+                var result = await SendToControllerAsync(frame);
+            }
+            catch(Exception e)
+            {
+                Log(e);
+                OnDataReceived -= onReceive;
+                tcs.TrySetException(e);
+            }
+            return await tcs.Task;
+        }
+
+        public async Task<bool> PingAsync()
+        {
+            if (connection == null || connection.State != HubConnectionState.Connected)
+                return false;
+
+            var tcs = new TaskCompletionSource<bool>();
+            var time = DateTime.Now;
+            var timer = new System.Timers.Timer
+            {
+                AutoReset = false,
+                Interval = Timeout
+            };
+
+            timer.Elapsed += (s, e) =>
+            {
+                timer.Stop();
+                Log($"Ping not received ->|<- {(DateTime.Now - time).TotalMilliseconds}ms");
+                tcs.TrySetResult(false);
+                timer.Dispose();
+            };
+
+            void onPing()
+            {
+                OnPingReceived -= onPing;
+                timer.Stop();
+                tcs.TrySetResult(true);
+                timer.Dispose();
+            }
+
+            OnPingReceived += onPing;
+
+            try
+            {
+                timer.Start();
+                await connection.SendAsync("Ping");
+            }
+            catch (Exception e)
+            {
+                Log(e);
+                timer.Stop();
+                tcs.TrySetResult(false);
+                timer.Dispose();
+            }
+
+            return await tcs.Task.ConfigureAwait(false);
+        }
+}
+
+    public class LoggerProvider : ILoggerProvider
+    {
+        public ILogger CreateLogger(string categoryName)
+            => new Logger();
+
+        public void Dispose()
+        {
+
+        }
+    }
+
+    public class Logger : ILogger, IDisposable
+    {
+        public IDisposable BeginScope<TState>(TState state) 
+            => this;
+
+        public void Dispose()
+        { }
+
+        public bool IsEnabled(LogLevel logLevel)
+            => true;
+
+        private void Log(Exception ex)
+            => Log(ex.ToString());
+
+        private void Log(string text)
+            => Console.WriteLine($"{DateTime.Now} | {text}");
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception exception, Func<TState, Exception, string> formatter)
+        {
+            var ex = exception != null ? exception.ToString() : "";
+
+            switch (logLevel)
+            {
+                case LogLevel.Information:
+                case LogLevel.Trace:
+                case LogLevel.None:
+                case LogLevel.Debug:
+                    Log($"[{logLevel}] [{eventId}] {formatter(state, exception)} {ex}");
+                    break;
+
+                case LogLevel.Warning:
+                    Log($"[{logLevel}] [{eventId}] {formatter(state, exception)} {ex}");
+                    break;
+
+                case LogLevel.Error:
+                case LogLevel.Critical:
+                    Log($"[{logLevel}] [{eventId}] {formatter(state, exception)} {ex}");
+                    break;
+            }
+        }
+    }
+```
+
+Create broker client instance and connect to controller
+
+```csharp
+var broker = new BrokerClient();
+
+var controllerSerial = "MV0TJ1HH4P";
+var controllerPin = 7851;
+
+if(await broker.ConnectAsync(controllerSerial, controllerPin))
+    Log("Connected with controller!");
+else
+    throw new Exception("Failed to connect to controller!");
+```
+
+Logging in user
+
+```csharp
+#r "Newtonsoft.Json"
+using Newtonsoft.Json;
+
+public class LoginUserRequest : DataFrame<LoginUser>
+    {
+        public LoginUserRequest(string email, string password)
+        {
+            Resource = "/users/user/login";
+            Method = Method.Put;
+            Data = new LoginUser 
+            {
+                Email = email,
+                Password = password
+            };
+        }
+    }
+
+    public class LoginUser
+    {
+        public string Email { get; set; }
+        public string Password { get; set; }
+    }
+
+public class UserData
+    {
+        public UserData()
+        {
+            Guid = string.Empty;
+        }
+
+        public string Guid { get; set; }
+        public string Name { get; set; }
+        public string Surname { get; set; }
+        public string Password { get; set; }
+        public string Email { get; set; }
+        public string Phone { get; set; }
+        public bool IsActive { get; set; }
+        public bool IsBanned { get; set; }
+        public bool IsAccountOnline { get; set; }
+        /// <summary>
+        /// Informacje o poziomie dostępu użytkownika <see cref="AccessLevel"/>
+        /// </summary>
+        public AccessLevel AccessLevel { get; set; }
+
+        /// <summary>
+        /// Pleć użytkownika
+        /// </summary>
+        public Genders Gender { get; set; }
+        public string ConfigurationTime { get; set; }
+        public bool IsGeolocationSet { get; set; }
+        public string UpdatesChannel { get; set; }
+    }
+
+public enum Genders
+    {
+        Unknown = 0,
+        Men = 1,
+        Woman = 2,
+        Other = 3
+    }
+
+public enum AccessLevel
+    {
+        /// <summary>
+        /// Umożliwia dostęp każdemu użytkownikowi
+        /// </summary>
+        Any = 0,
+
+        /// <summary>
+        /// Najniższy możliwy poziom dostępu, pozwala na dostęp do interfejsów tylko do odczytu i ew. zmiany parametrów konta zalogowanego użytkownika
+        /// </summary>
+        Guest = 10,
+
+        /// <summary>
+        /// Poziom dostępu pozwalający na sterowanie urządzeniami, dostęp do powiadomień, zdarzeń etc. nie pozwala na zmianę konfiguracji urządzeń, protokołów, sekwencji etc.
+        /// </summary>
+        Standard = 20,
+
+        /// <summary>
+        /// Konto administratora pozwalające na pełne zarządzanie konfiguracją urządzeń, protokołów, sekwencji, zdarzeń etc. pozwala również na zarządzanie innymi kontami użytkowników
+        /// </summary>
+        Admin = 30,
+
+        /// <summary>
+        /// Instalator pozwala na zarządzanie pełną funkcjonalnością kontrolera, pozwalana dodawanie administratorów, udostępnia dodatkowe zasoby wspomagajace konfigurację urządzeń etc.
+        /// </summary>
+        Installator = 40,
+
+        /// <summary>
+        /// Najwyższy możliwy poziom dostępu pozwalający na pełen dostęp do urządzenia i kontrolowanie wszystkich funkcjonalności kontrolera, zarezerwowane dla dostępu przez pomoc zdalną. Udostępnia dodatkowe interfejsy pozwalające na analizę stanu kontrolera etc.
+        /// </summary>
+        Support = 50
+    }
+var userInfo = await broker.SendAndWaitForResponseAsync<LoginUser, UserData>(new LoginUserRequest("installator@installator", "QT54K96X3P9299"));
+
+Log($"Logeed in, user info: \n{JsonConvert.SerializeObject(userInfo, Formatting.Indented)}");
+```
