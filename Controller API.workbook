@@ -552,8 +552,8 @@ Create broker client instance and connect to controller
 ```csharp
 var broker = new BrokerClient();
 
-var controllerSerial = "MV0TJ1HH4P";
-var controllerPin = 7851;
+var controllerSerial = "QT54K96X3P";
+var controllerPin = 9299;
 
 if(await broker.ConnectAsync(controllerSerial, controllerPin))
     Log("Connected with controller!");
